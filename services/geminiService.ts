@@ -4,7 +4,6 @@ import { Listing, Booking, User } from '../types';
 // NOTE: Ensure your .env file is configured correctly for this to work in production.
 const API_KEY = import.meta.env.VITE_GEMINI_API_KEY
 
-console.log("VITE_GEMINI_API_KEY status:", typeof API_KEY, "Is it set?", !!API_KEY);
 
 if (!API_KEY) {
     throw new Error("API_KEY environment variable is not set.");
