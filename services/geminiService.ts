@@ -1,7 +1,6 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { Listing, Booking, User } from '../types';
 
-// NOTE: Ensure your .env file is configured correctly for this to work in production.
 const API_KEY = import.meta.env.VITE_GEMINI_API_KEY
 
 
@@ -9,7 +8,12 @@ if (!API_KEY) {
     throw new Error("API_KEY environment variable is not set.");
 }
 
+// NOTE: We initialize the client without specifying a model here, 
+// and define the model in each generateContent call.
 const ai = new GoogleGenAI({ apiKey: API_KEY });
+
+// The preferred model for non-grounded, structured responses.
+const MODEL_NAME = 'gemini-2.5-flash-preview-09-2025';
 
 // ------------------------------------------------------------------------------------------------------------------
 // --- 1. Parking Search Schemas and Function -------------------------------------------------------------------------
@@ -50,6 +54,13 @@ const parkingResponseSchema = {
     required: ["marketplaceResults", "webResults"],
 };
 
+/**
+ * Searches for parking spots based on the user's query, integrating both
+ * real-time marketplace data and general web knowledge (via the model's training).
+ * @param userQuery The natural language query from the user (e.g., "parking near stadium tomorrow").
+ * @param marketplaceListings The current, available listings from Firestore.
+ * @returns A JSON string containing structured search results.
+ */
 export async function findParkingSpots(userQuery: string, marketplaceListings: Listing[]): Promise<string> {
     const marketplaceListingsJson = JSON.stringify(marketplaceListings.map(l => ({
         id: l.id, // Important: pass the ID to Gemini
@@ -86,7 +97,7 @@ Analyze the user's query and the marketplace data. Return a JSON object matching
 
     try {
         const response = await ai.models.generateContent({
-            model: 'gemini-2.5-flash',
+            model: MODEL_NAME,
             contents: prompt,
             config: {
                 responseMimeType: "application/json",
@@ -114,7 +125,15 @@ const singleEmailSchema = {
     required: ["subject", "body"],
 };
 
+/**
+ * Generates an email to the driveway owner requesting a booking approval.
+ */
 export async function generateBookingRequestEmail(booking: Booking): Promise<{ subject: string; body: string }> {
+    const fallback = {
+        subject: `New Booking Request for ${booking.location}`,
+        body: `You have a new booking request from ${booking.bookerName} for your driveway at ${booking.location} on ${booking.date}. Please log in to your ParkPulse dashboard to respond.`,
+    };
+
     const prompt = `
     You are the automated notification system for ParkPulse.
     A user named "${booking.bookerName}" has just requested to book your driveway at "${booking.location}".
@@ -132,21 +151,32 @@ export async function generateBookingRequestEmail(booking: Booking): Promise<{ s
     `;
     try {
         const response = await ai.models.generateContent({
-            model: 'gemini-2.5-flash',
+            model: MODEL_NAME,
             contents: prompt,
             config: { responseMimeType: "application/json", responseSchema: singleEmailSchema }
         });
-        return JSON.parse(response.text);
+        // Safely parse the JSON response
+        try {
+            return JSON.parse(response.text);
+        } catch (e) {
+            console.warn("Model returned malformed JSON for generateBookingRequestEmail. Using fallback.", response.text);
+            return fallback;
+        }
     } catch (error) {
         console.error("Error generating booking request email:", error);
-        return {
-            subject: `New Booking Request for ${booking.location}`,
-            body: `You have a new booking request from ${booking.bookerName} for your driveway at ${booking.location} on ${booking.date}. Please log in to your ParkPulse dashboard to respond.`,
-        };
+        return fallback;
     }
 }
 
+/**
+ * Generates an email to the booker informing them their booking request was denied.
+ */
 export async function generateBookingDeniedEmail(booking: Booking): Promise<{ subject: string; body: string }> {
+    const fallback = {
+        subject: `Update on your booking request for ${booking.location}`,
+        body: `Unfortunately, your booking request for the driveway at ${booking.location} on ${booking.date} could not be accepted by the owner. We encourage you to search for other available spots on ParkPulse.`,
+    };
+
     const prompt = `
     You are the automated notification system for ParkPulse.
     A booking request from "${booking.bookerName}" for the driveway at "${booking.location}" has been denied by the owner.
@@ -163,17 +193,20 @@ export async function generateBookingDeniedEmail(booking: Booking): Promise<{ su
     `;
     try {
         const response = await ai.models.generateContent({
-            model: 'gemini-2.5-flash',
+            model: MODEL_NAME,
             contents: prompt,
             config: { responseMimeType: "application/json", responseSchema: singleEmailSchema }
         });
-        return JSON.parse(response.text);
+        // Safely parse the JSON response
+        try {
+            return JSON.parse(response.text);
+        } catch (e) {
+            console.warn("Model returned malformed JSON for generateBookingDeniedEmail. Using fallback.", response.text);
+            return fallback;
+        }
     } catch (error) {
         console.error("Error generating booking denied email:", error);
-        return {
-            subject: `Update on your booking request for ${booking.location}`,
-            body: `Unfortunately, your booking request for the driveway at ${booking.location} on ${booking.date} could not be accepted by the owner. We encourage you to search for other available spots on ParkPulse.`,
-        };
+        return fallback;
     }
 }
 
@@ -201,9 +234,19 @@ const bookingConfirmationEmailSchema = {
     required: ["bookerSubject", "bookerEmailContent", "ownerSubject", "ownerEmailContent"],
 };
 
+/**
+ * Generates two emails: one for the booker (confirmation) and one for the owner (notification).
+ */
 export async function generateBookingConfirmationEmails(
     details: { bookerName: string; ownerEmail: string; location: string; date: string; startTime: string; endTime: string, rate: number }
 ): Promise<{ bookerSubject: string; bookerEmailContent: string; ownerSubject: string; ownerEmailContent: string }> {
+    const fallback = {
+        bookerSubject: `Booking Confirmed: ${details.location}`,
+        bookerEmailContent: `Your booking for ${details.location} on ${details.date} from ${details.startTime} to ${details.endTime} is confirmed.`,
+        ownerSubject: `Booking Confirmed: ${details.location}`,
+        ownerEmailContent: `Your driveway at ${details.location} has been booked by ${details.bookerName} on ${details.date} from ${details.startTime} to ${details.endTime}.`,
+    };
+
     const prompt = `
 You are the automated notification system for ParkPulse.
 A booking has just been CONFIRMED for a driveway at "${details.location}" by "${details.bookerName}".
@@ -221,22 +264,23 @@ IMPORTANT: Use the provided time values *exactly* as they are given (e.g., '09:0
 `;
     try {
         const response = await ai.models.generateContent({
-            model: 'gemini-2.5-flash',
+            model: MODEL_NAME,
             contents: prompt,
             config: {
                 responseMimeType: "application/json",
                 responseSchema: bookingConfirmationEmailSchema,
             }
         });
-        return JSON.parse(response.text);
+        // Safely parse the JSON response
+        try {
+            return JSON.parse(response.text);
+        } catch (e) {
+            console.warn("Model returned malformed JSON for generateBookingConfirmationEmails. Using fallback.", response.text);
+            return fallback;
+        }
     } catch (error) {
         console.error("Error generating emails with Gemini API:", error);
-        return {
-            bookerSubject: `Booking Confirmed: ${details.location}`,
-            bookerEmailContent: `Your booking for ${details.location} on ${details.date} from ${details.startTime} to ${details.endTime} is confirmed.`,
-            ownerSubject: `Booking Confirmed: ${details.location}`,
-            ownerEmailContent: `Your driveway at ${details.location} has been booked by ${details.bookerName} on ${details.date} from ${details.startTime} to ${details.endTime}.`,
-        };
+        return fallback;
     }
 }
 
@@ -255,10 +299,18 @@ const listingConfirmationEmailSchema = {
     required: ["subject", "emailContent"],
 };
 
+/**
+ * Generates a confirmation email to the owner after they successfully list a driveway.
+ */
 export async function generateListingConfirmationEmail(
     listing: Listing,
     userName: string
 ): Promise<{ subject: string; emailContent: string }> {
+    const fallback = {
+        subject: "Your Driveway is Listed!",
+        emailContent: `Congratulations, ${userName}! Your driveway at ${listing.address} is now live on ParkPulse.`,
+    };
+
     const prompt = `
 You are the automated notification system for ParkPulse.
 A user named "${userName}" has just successfully listed their driveway.
@@ -277,20 +329,23 @@ Return a single JSON object with "subject" and "emailContent".
 `;
     try {
         const response = await ai.models.generateContent({
-            model: 'gemini-2.5-flash',
+            model: MODEL_NAME,
             contents: prompt,
             config: {
                 responseMimeType: "application/json",
                 responseSchema: listingConfirmationEmailSchema,
             }
         });
-        return JSON.parse(response.text);
+        // Safely parse the JSON response
+        try {
+            return JSON.parse(response.text);
+        } catch (e) {
+            console.warn("Model returned malformed JSON for generateListingConfirmationEmail. Using fallback.", response.text);
+            return fallback;
+        }
     } catch (error) {
         console.error("Error generating listing confirmation email:", error);
-        return {
-            subject: "Your Driveway is Listed!",
-            emailContent: `Congratulations, ${userName}! Your driveway at ${listing.address} is now live on ParkPulse.`,
-        };
+        return fallback;
     }
 }
 
@@ -305,10 +360,20 @@ const bookingCancellationEmailSchema = {
     required: ["bookerSubject", "bookerEmailContent", "ownerSubject", "ownerEmailContent"],
 };
 
+/**
+ * Generates two emails: one for the booker (cancellation confirmation) and one for the owner (notification of cancellation).
+ */
 export async function generateBookingCancellationEmails(
     booking: Booking,
     canceler: User
 ): Promise<{ bookerSubject: string; bookerEmailContent: string; ownerSubject: string; ownerEmailContent: string }> {
+    const fallback = {
+        bookerSubject: `Booking Canceled: ${booking.location}`,
+        bookerEmailContent: `Your booking for ${booking.location} on ${booking.date} has been successfully canceled.`,
+        ownerSubject: `Booking Canceled by User: ${booking.location}`,
+        ownerEmailContent: `The booking for your driveway at ${booking.location} on ${booking.date} from ${booking.startTime} to ${booking.endTime} has been canceled by the user.`,
+    };
+
     const prompt = `
 You are the automated notification system for ParkPulse.
 A booking for the driveway at "${booking.location}" has been CANCELED by the booker, "${canceler.name}".
@@ -325,26 +390,36 @@ IMPORTANT: Use the provided time values *exactly* as they are given. Do not refo
 `;
     try {
         const response = await ai.models.generateContent({
-            model: 'gemini-2.5-flash',
+            model: MODEL_NAME,
             contents: prompt,
             config: {
                 responseMimeType: "application/json",
                 responseSchema: bookingCancellationEmailSchema,
             }
         });
-        return JSON.parse(response.text);
+        // Safely parse the JSON response
+        try {
+            return JSON.parse(response.text);
+        } catch (e) {
+            console.warn("Model returned malformed JSON for generateBookingCancellationEmails. Using fallback.", response.text);
+            return fallback;
+        }
     } catch (error) {
         console.error("Error generating cancellation emails:", error);
-        return {
-            bookerSubject: `Booking Canceled: ${booking.location}`,
-            bookerEmailContent: `Your booking for ${booking.location} on ${booking.date} has been successfully canceled.`,
-            ownerSubject: `Booking Canceled by User: ${booking.location}`,
-            ownerEmailContent: `The booking for your driveway at ${booking.location} on ${booking.date} from ${booking.startTime} to ${booking.endTime} has been canceled by the user.`,
-        };
+        return fallback;
     }
 }
 
+/**
+ * Generates an email to the booker informing them their booking was auto-canceled 
+ * due to the owner updating the listing.
+ */
 export async function generateListingUpdateCancellationEmail(booking: Booking): Promise<{ subject: string; body: string }> {
+    const fallback = {
+        subject: `Important Update on your booking for ${booking.location}`,
+        body: `Unfortunately, your booking for the driveway at ${booking.location} on ${booking.date} has been canceled because the owner updated their availability. We apologize for any inconvenience this may cause and encourage you to search for other available spots on ParkPulse.`,
+    };
+
     const prompt = `
     You are the automated notification system for ParkPulse.
     A booking for "${booking.location}" has been automatically canceled because the driveway owner updated their listing's availability.
@@ -362,16 +437,19 @@ export async function generateListingUpdateCancellationEmail(booking: Booking): 
     `;
     try {
         const response = await ai.models.generateContent({
-            model: 'gemini-2.5-flash',
+            model: MODEL_NAME,
             contents: prompt,
             config: { responseMimeType: "application/json", responseSchema: singleEmailSchema }
         });
-        return JSON.parse(response.text);
+        // Safely parse the JSON response
+        try {
+            return JSON.parse(response.text);
+        } catch (e) {
+            console.warn("Model returned malformed JSON for generateListingUpdateCancellationEmail. Using fallback.", response.text);
+            return fallback;
+        }
     } catch (error) {
         console.error("Error generating listing update cancellation email:", error);
-        return {
-            subject: `Important Update on your booking for ${booking.location}`,
-            body: `Unfortunately, your booking for the driveway at ${booking.location} on ${booking.date} has been canceled because the owner updated their availability. We apologize for any inconvenience this may cause and encourage you to search for other available spots on ParkPulse.`,
-        };
+        return fallback;
     }
 }

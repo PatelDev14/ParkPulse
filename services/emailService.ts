@@ -1,27 +1,35 @@
-
-/**
- * Opens the user's default mail client with a pre-filled email.
- * @param to The recipient's email address.
- * @param subject The subject line of the email.
- * @param htmlBody The HTML content of the email.
- */
-export const sendEmail = (to: string, subject: string, htmlBody: string): void => {
+export const sendEmail = (to: string, subject: string, htmlBody: string): boolean => {
+    // 1. Basic Validation
     if (!to || !subject || !htmlBody) {
-        console.warn("Attempted to trigger mail client with missing `to`, `subject`, or `body`.");
-        return;
+        console.error("sendEmail failed: Missing required fields (to, subject, or body).");
+        return false;
     }
-    
-    // Convert basic HTML to plain text for mailto link.
-    // This handles line breaks and removes other HTML tags for better compatibility.
-    const plainTextBody = htmlBody
-        .replace(/<br\s*\/?>/gi, '\n') 
-        .replace(/<[^>]*>/g, '');      
 
+    // 2. Convert HTML to Plain Text for mailto link compatibility
+    // Step a: Replace <br> and <p> tags with two newlines for readability
+    let plainTextBody = htmlBody
+        .replace(/<br\s*\/?>/gi, '\n\n') 
+        .replace(/<p\s*\/?>/gi, '\n\n'); 
+
+    // Step b: Remove all remaining HTML tags
+    plainTextBody = plainTextBody.replace(/<[^>]*>/g, '');
+    
+    // Step c: Tidy up multiple newlines created by stripping (e.g., from nested tags)
+    plainTextBody = plainTextBody.replace(/(\n\s*){3,}/g, '\n\n').trim();
+
+    // 3. Encode components
     const encodedSubject = encodeURIComponent(subject);
     const encodedBody = encodeURIComponent(plainTextBody);
 
+    // 4. Construct the mailto link
     const mailtoLink = `mailto:${to}?subject=${encodedSubject}&body=${encodedBody}`;
 
-    // This command opens the default mail client.
-    window.location.href = mailtoLink;
+    // 5. Trigger the default mail client
+    try {
+        window.location.href = mailtoLink;
+        return true;
+    } catch (error) {
+        console.error("sendEmail failed to open mail client:", error);
+        return false;
+    }
 };
